@@ -1,0 +1,90 @@
+# Smoke test of a published Bawaba release, installed the way a customer would: Windows, both Macs and Linux. The app must
+# still be running after 45 s with its Rust core (li-cli) alive; a screenshot of each screen is kept on the run.
+name: smoke
+on:
+  workflow_run:
+    workflows: [release]
+    types: [completed]
+  workflow_dispatch:
+    inputs:
+      tag: { description: "Release tag (default: latest)", required: false }
+permissions:
+  contents: read
+jobs:
+  windows:
+    runs-on: windows-latest
+    steps:
+      - name: Download and install
+        shell: pwsh
+        run: |
+          $tag = "${{ github.event.inputs.tag }}"
+          if (-not $tag) { $tag = (Invoke-RestMethod "https://api.github.com/repos/${{ github.repository }}/releases/latest").tag_name }
+          $v = $tag.TrimStart("v")
+          Invoke-WebRequest "https://github.com/${{ github.repository }}/releases/download/$tag/Bawaba-Setup-$v.exe" -OutFile setup.exe
+          Start-Process .\setup.exe -ArgumentList "/S" -Wait
+          $exe = Get-ChildItem "$env:LOCALAPPDATA\Programs" -Recurse -Filter Bawaba.exe -ErrorAction SilentlyContinue | Select-Object -First 1
+          if (-not $exe) { throw "Bawaba.exe not installed" }
+          "EXE=$($exe.FullName)" | Out-File -Append $env:GITHUB_ENV
+      - name: Open, check the core, screenshot
+        shell: pwsh
+        run: |
+          $p = Start-Process $env:EXE -PassThru
+          Start-Sleep 45
+          if ($p.HasExited) { throw "app exited with code $($p.ExitCode)" }
+          if (-not (Get-Process li-cli -ErrorAction SilentlyContinue)) { throw "the core (li-cli) is not running" }
+          Add-Type -AssemblyName System.Windows.Forms, System.Drawing
+          $b = [System.Windows.Forms.Screen]::PrimaryScreen.Bounds
+          $bmp = New-Object System.Drawing.Bitmap $b.Width, $b.Height
+          [System.Drawing.Graphics]::FromImage($bmp).CopyFromScreen($b.Location, [System.Drawing.Point]::Empty, $b.Size)
+          $bmp.Save("windows.png")
+          Get-Process Bawaba, li-cli | Format-Table -AutoSize
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with: { name: windows, path: windows.png, if-no-files-found: ignore }
+  macos:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { os: macos-latest, zip: arm64-mac }
+          - { os: macos-15-intel, zip: mac }
+    runs-on: ${{ matrix.os }}
+    steps:
+      - name: Download, open, check the core
+        run: |
+          tag="${{ github.event.inputs.tag }}"
+          [ -z "$tag" ] && tag=$(curl -fsSL "https://api.github.com/repos/${{ github.repository }}/releases/latest" | python3 -c 'import json,sys; print(json.load(sys.stdin)["tag_name"])')
+          v=${tag#v}
+          curl -fsSL "https://github.com/${{ github.repository }}/releases/download/$tag/Bawaba-$v-${{ matrix.zip }}.zip" -o b.zip && ditto -x -k b.zip . && xattr -cr Bawaba.app
+          codesign --verify --deep Bawaba.app && echo "signature ok"
+          ./Bawaba.app/Contents/MacOS/Bawaba > app.log 2>&1 &
+          echo $! > app.pid
+          sleep 45
+          kill -0 "$(cat app.pid)" || { echo "app exited"; tail -60 app.log; exit 1; }
+          pgrep -x li-cli || { echo "the core (li-cli) is not running"; tail -60 app.log; exit 1; }
+          screencapture -x macos.png || true
+          kill "$(cat app.pid)"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with: { name: "${{ matrix.os }}", path: "macos.png\napp.log", if-no-files-found: ignore }
+  linux:
+    runs-on: ubuntu-22.04
+    steps:
+      - name: Download, open, check the core
+        run: |
+          sudo apt-get update -qq && sudo apt-get install -y -qq xvfb libfuse2 imagemagick >/dev/null
+          tag="${{ github.event.inputs.tag }}"
+          [ -z "$tag" ] && tag=$(curl -fsSL "https://api.github.com/repos/${{ github.repository }}/releases/latest" | python3 -c 'import json,sys; print(json.load(sys.stdin)["tag_name"])')
+          v=${tag#v}
+          curl -fsSL "https://github.com/${{ github.repository }}/releases/download/$tag/Bawaba-$v.AppImage" -o Bawaba.AppImage && chmod +x Bawaba.AppImage
+          Xvfb :99 -screen 0 1400x900x24 & export DISPLAY=:99
+          ./Bawaba.AppImage --no-sandbox > app.log 2>&1 &
+          echo $! > app.pid
+          sleep 45
+          kill -0 "$(cat app.pid)" || { echo "app exited"; tail -60 app.log; exit 1; }
+          pgrep -x li-cli || { echo "the core (li-cli) is not running"; tail -60 app.log; exit 1; }
+          import -window root linux.png || true
+          kill "$(cat app.pid)"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with: { name: linux, path: "linux.png\napp.log", if-no-files-found: ignore }
