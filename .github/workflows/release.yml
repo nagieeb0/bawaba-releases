@@ -1,0 +1,85 @@
+# Builds and publishes a Bawaba release: each OS on its own runner (sidecar + installer), then one release with every file.
+# The source is the private repo, read with a read-only deploy key (secret SOURCE_DEPLOY_KEY). Run: gh workflow run release.yml -f version=0.2.0
+name: release
+on:
+  workflow_dispatch:
+    inputs:
+      version: { description: "version, e.g. 0.2.0", required: true }
+      notes: { description: "release notes", required: false, default: "" }
+permissions:
+  contents: write
+jobs:
+  build:
+    strategy:
+      fail-fast: true
+      matrix:
+        os: [windows-latest, macos-latest, ubuntu-22.04]
+    runs-on: ${{ matrix.os }}
+    env:
+      CSC_IDENTITY_AUTO_DISCOVERY: "false"
+    steps:
+      - uses: actions/checkout@v4
+        with: { repository: nagieeb0/bawaba, ref: main, ssh-key: "${{ secrets.SOURCE_DEPLOY_KEY }}" }
+      - uses: dtolnay/rust-toolchain@stable
+        with: { targets: "${{ matrix.os == 'macos-latest' && 'x86_64-apple-darwin,aarch64-apple-darwin' || '' }}" }
+      - uses: swatinem/rust-cache@v2
+      - name: sidecar
+        shell: bash
+        run: |
+          export BAWABA_RELEASED=$(date -u +%F)
+          case "$RUNNER_OS" in
+            macOS)
+              for t in x86_64-apple-darwin aarch64-apple-darwin; do cargo build --release -p li-core --bin li-cli --target $t; done
+              mkdir -p build/bin/mac && lipo -create -output build/bin/mac/li-cli target/x86_64-apple-darwin/release/li-cli target/aarch64-apple-darwin/release/li-cli ;;
+            Windows)
+              cargo build --release -p li-core --bin li-cli && mkdir -p build/bin/win && cp target/release/li-cli.exe build/bin/win/ ;;
+            *)
+              cargo build --release -p li-core --bin li-cli && mkdir -p build/bin/linux && cp target/release/li-cli build/bin/linux/ ;;
+          esac
+      - uses: actions/setup-node@v4
+        with: { node-version: 22 }
+      - run: npm ci
+      - run: npm version "${{ inputs.version }}" --no-git-tag-version --allow-same-version
+      - name: installer
+        shell: bash
+        run: |
+          case "$RUNNER_OS" in
+            Windows) npx electron-builder --win nsis --x64 --publish never ;;
+            Linux) npx electron-builder --linux AppImage --publish never ;;
+            macOS)
+              npx electron-builder --mac zip --x64 --arm64 --publish never
+              # Apple Silicon refuses unsigned code: ad-hoc sign both apps, re-zip, and write the update manifest with the new hashes
+              for z in dist/*-mac.zip; do
+                w=$(mktemp -d); ditto -x -k "$z" "$w"; codesign --force --deep --sign - "$w/Bawaba.app"
+                rm -f "$z" "$z.blockmap"; ditto -c -k --keepParent "$w/Bawaba.app" "$z"; rm -rf "$w"
+              done
+              python3 - "${{ inputs.version }}" <<'PY'
+          import base64, datetime, hashlib, os, sys
+          v = sys.argv[1]; fs = [f"Bawaba-{v}-mac.zip", f"Bawaba-{v}-arm64-mac.zip"]
+          h = lambda z: base64.b64encode(hashlib.sha512(open("dist/" + z, "rb").read()).digest()).decode()
+          out = [f"version: {v}", "files:"]
+          for z in fs: out += [f"  - url: {z}", f"    sha512: {h(z)}", f"    size: {os.path.getsize('dist/' + z)}"]
+          out += [f"path: {fs[0]}", f"sha512: {h(fs[0])}", f"releaseDate: '{datetime.datetime.now(datetime.timezone.utc).isoformat(timespec='milliseconds')}'"]
+          open("dist/latest-mac.yml", "w").write("\n".join(out) + "\n")
+          PY
+              ;;
+          esac
+      - uses: actions/upload-artifact@v4
+        with:
+          name: bawaba-${{ matrix.os }}
+          path: |
+            dist/*.exe
+            dist/*.exe.blockmap
+            dist/*-mac.zip
+            dist/*.AppImage
+            dist/latest*.yml
+          if-no-files-found: error
+  publish:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with: { path: dist, merge-multiple: true }
+      - run: ls -la dist
+      - run: gh release create "v${{ inputs.version }}" dist/* --repo "${{ github.repository }}" --title "Bawaba ${{ inputs.version }}" --notes "${{ inputs.notes || format('Bawaba {0}', inputs.version) }}"
+        env: { GH_TOKEN: "${{ github.token }}" }
