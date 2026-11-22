@@ -10,6 +10,8 @@ on:
       tag: { description: "Release tag (default: latest)", required: false }
 permissions:
   contents: read
+env:
+  GH_TOKEN: ${{ github.token }}
 jobs:
   windows:
     runs-on: windows-latest
@@ -18,7 +20,7 @@ jobs:
         shell: pwsh
         run: |
           $tag = "${{ github.event.inputs.tag }}"
-          if (-not $tag) { $tag = (Invoke-RestMethod "https://api.github.com/repos/${{ github.repository }}/releases/latest").tag_name }
+          if (-not $tag) { $tag = gh release view -R "${{ github.repository }}" --json tagName --jq .tagName }
           $v = $tag.TrimStart("v")
           Invoke-WebRequest "https://github.com/${{ github.repository }}/releases/download/$tag/Bawaba-Setup-$v.exe" -OutFile setup.exe
           Start-Process .\setup.exe -ArgumentList "/S" -Wait
@@ -53,7 +55,7 @@ jobs:
       - name: Download, open, check the core
         run: |
           tag="${{ github.event.inputs.tag }}"
-          [ -z "$tag" ] && tag=$(curl -fsSL "https://api.github.com/repos/${{ github.repository }}/releases/latest" | python3 -c 'import json,sys; print(json.load(sys.stdin)["tag_name"])')
+          [ -z "$tag" ] && tag=$(gh release view -R "${{ github.repository }}" --json tagName --jq .tagName)
           v=${tag#v}
           curl -fsSL "https://github.com/${{ github.repository }}/releases/download/$tag/Bawaba-$v-${{ matrix.zip }}.zip" -o b.zip && ditto -x -k b.zip . && xattr -cr Bawaba.app
           codesign --verify --deep Bawaba.app && echo "signature ok"
@@ -74,7 +76,7 @@ jobs:
         run: |
           sudo apt-get update -qq && sudo apt-get install -y -qq xvfb libfuse2 imagemagick >/dev/null
           tag="${{ github.event.inputs.tag }}"
-          [ -z "$tag" ] && tag=$(curl -fsSL "https://api.github.com/repos/${{ github.repository }}/releases/latest" | python3 -c 'import json,sys; print(json.load(sys.stdin)["tag_name"])')
+          [ -z "$tag" ] && tag=$(gh release view -R "${{ github.repository }}" --json tagName --jq .tagName)
           v=${tag#v}
           curl -fsSL "https://github.com/${{ github.repository }}/releases/download/$tag/Bawaba-$v.AppImage" -o Bawaba.AppImage && chmod +x Bawaba.AppImage
           Xvfb :99 -screen 0 1400x900x24 & export DISPLAY=:99
