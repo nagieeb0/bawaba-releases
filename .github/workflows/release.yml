@@ -80,6 +80,7 @@ jobs:
     steps:
       - uses: actions/download-artifact@v4
         with: { path: dist, merge-multiple: true }
-      - run: ls -la dist
+      # the update manifests name the Windows installer with dashes, and gh would turn its spaces into dots
+      - run: cd dist && for f in *\ *; do [ -e "$f" ] && mv "$f" "${f// /-}"; done; ls -la
       - run: gh release create "v${{ inputs.version }}" dist/* --repo "${{ github.repository }}" --title "Bawaba ${{ inputs.version }}" --notes "${{ inputs.notes || format('Bawaba {0}', inputs.version) }}"
         env: { GH_TOKEN: "${{ github.token }}" }
