@@ -64,6 +64,16 @@ jobs:
           PY
               ;;
           esac
+      # the built app signs in on a fake LinkedIn (offline): no console window, no false pause, session kept. A failure stops the release.
+      - name: sign-in test
+        shell: bash
+        timeout-minutes: 12
+        run: |
+          case "$RUNNER_OS" in
+            Windows) node scripts/e2e-login.mjs "$PWD/dist/win-unpacked/Bawaba.exe" ;;
+            Linux) sudo apt-get update -qq && sudo apt-get install -y -qq xvfb >/dev/null; xvfb-run -a -s "-screen 0 1400x900x24" node scripts/e2e-login.mjs "$PWD/dist/linux-unpacked/bawaba" --no-sandbox ;;
+            macOS) w=$(mktemp -d); ditto -x -k dist/*-arm64-mac.zip "$w"; node scripts/e2e-login.mjs "$w/Bawaba.app/Contents/MacOS/Bawaba" --use-mock-keychain ;;
+          esac
       - uses: actions/upload-artifact@v4
         with:
           name: bawaba-${{ matrix.os }}
